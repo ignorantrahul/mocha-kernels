@@ -2,7 +2,7 @@
  * Gadget Function Driver for MTP
  *
  * Copyright (C) 2010 Google, Inc.
- * Copyright (c) 2013, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * Author: Mike Lockwood <lockwood@android.com>
  *
@@ -38,7 +38,7 @@
 #include <linux/usb/ch9.h>
 #include <linux/usb/f_mtp.h>
 
-#define MTP_BULK_BUFFER_SIZE       32768
+#define MTP_BULK_BUFFER_SIZE       16384
 #define INTR_BUFFER_SIZE           28
 
 /* String IDs */
@@ -131,6 +131,33 @@ static struct usb_interface_descriptor ptp_interface_desc = {
 	.bInterfaceProtocol     = 1,
 };
 
+static struct usb_endpoint_descriptor mtp_ss_in_desc = {
+	.bLength                = USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType        = USB_DT_ENDPOINT,
+	.bEndpointAddress       = USB_DIR_IN,
+	.bmAttributes           = USB_ENDPOINT_XFER_BULK,
+	.wMaxPacketSize         = __constant_cpu_to_le16(1024),
+};
+
+static struct usb_ss_ep_comp_descriptor mtp_ss_in_comp_desc = {
+	.bLength		= sizeof(mtp_ss_in_comp_desc),
+	.bDescriptorType	= USB_DT_SS_ENDPOINT_COMP,
+	/* .bMaxBurst		= DYNAMIC, */
+};
+
+static struct usb_endpoint_descriptor mtp_ss_out_desc = {
+	.bLength                = USB_DT_ENDPOINT_SIZE,
+	.bDescriptorType        = USB_DT_ENDPOINT,
+	.bEndpointAddress       = USB_DIR_OUT,
+	.bmAttributes           = USB_ENDPOINT_XFER_BULK,
+	.wMaxPacketSize         = __constant_cpu_to_le16(1024),
+};
+
+static struct usb_ss_ep_comp_descriptor mtp_ss_out_comp_desc = {
+	.bLength		= sizeof(mtp_ss_out_comp_desc),
+	.bDescriptorType	= USB_DT_SS_ENDPOINT_COMP,
+	/* .bMaxBurst		= DYNAMIC, */
+};
 static struct usb_endpoint_descriptor mtp_highspeed_in_desc = {
 	.bLength                = USB_DT_ENDPOINT_SIZE,
 	.bDescriptorType        = USB_DT_ENDPOINT,
@@ -170,6 +197,12 @@ static struct usb_endpoint_descriptor mtp_intr_desc = {
 	.bInterval              = 6,
 };
 
+static struct usb_ss_ep_comp_descriptor mtp_intr_ss_comp_desc = {
+	.bLength		= sizeof(mtp_intr_ss_comp_desc),
+	.bDescriptorType	= USB_DT_SS_ENDPOINT_COMP,
+	.wBytesPerInterval	= cpu_to_le16(INTR_BUFFER_SIZE),
+};
+
 static struct usb_descriptor_header *fs_mtp_descs[] = {
 	(struct usb_descriptor_header *) &mtp_interface_desc,
 	(struct usb_descriptor_header *) &mtp_fullspeed_in_desc,
@@ -186,6 +219,17 @@ static struct usb_descriptor_header *hs_mtp_descs[] = {
 	NULL,
 };
 
+static struct usb_descriptor_header *ss_mtp_descs[] = {
+	(struct usb_descriptor_header *) &mtp_interface_desc,
+	(struct usb_descriptor_header *) &mtp_ss_in_desc,
+	(struct usb_descriptor_header *) &mtp_ss_in_comp_desc,
+	(struct usb_descriptor_header *) &mtp_ss_out_desc,
+	(struct usb_descriptor_header *) &mtp_ss_out_comp_desc,
+	(struct usb_descriptor_header *) &mtp_intr_desc,
+	(struct usb_descriptor_header *) &mtp_intr_ss_comp_desc,
+	NULL,
+};
+
 static struct usb_descriptor_header *fs_ptp_descs[] = {
 	(struct usb_descriptor_header *) &ptp_interface_desc,
 	(struct usb_descriptor_header *) &mtp_fullspeed_in_desc,
@@ -199,6 +243,17 @@ static struct usb_descriptor_header *hs_ptp_descs[] = {
 	(struct usb_descriptor_header *) &mtp_highspeed_in_desc,
 	(struct usb_descriptor_header *) &mtp_highspeed_out_desc,
 	(struct usb_descriptor_header *) &mtp_intr_desc,
+	NULL,
+};
+
+static struct usb_descriptor_header *ss_ptp_descs[] = {
+	(struct usb_descriptor_header *) &ptp_interface_desc,
+	(struct usb_descriptor_header *) &mtp_ss_in_desc,
+	(struct usb_descriptor_header *) &mtp_ss_in_comp_desc,
+	(struct usb_descriptor_header *) &mtp_ss_out_desc,
+	(struct usb_descriptor_header *) &mtp_ss_out_comp_desc,
+	(struct usb_descriptor_header *) &mtp_intr_desc,
+	(struct usb_descriptor_header *) &mtp_intr_ss_comp_desc,
 	NULL,
 };
 
@@ -491,10 +546,11 @@ static ssize_t mtp_read(struct file *fp, char __user *buf,
 	struct mtp_dev *dev = fp->private_data;
 	struct usb_composite_dev *cdev = dev->cdev;
 	struct usb_request *req;
-	int r = count, xfer;
+	ssize_t r = count;
+	unsigned xfer;
 	int ret = 0;
 
-	DBG(cdev, "mtp_read(%d)\n", count);
+	DBG(cdev, "mtp_read(%zu)\n", count);
 
 	if (count > MTP_BULK_BUFFER_SIZE)
 		return -EINVAL;
@@ -558,7 +614,7 @@ done:
 		dev->state = STATE_READY;
 	spin_unlock_irq(&dev->lock);
 
-	DBG(cdev, "mtp_read returning %d\n", r);
+	DBG(cdev, "mtp_read returning %zd\n", r);
 	return r;
 }
 
@@ -568,11 +624,12 @@ static ssize_t mtp_write(struct file *fp, const char __user *buf,
 	struct mtp_dev *dev = fp->private_data;
 	struct usb_composite_dev *cdev = dev->cdev;
 	struct usb_request *req = 0;
-	int r = count, xfer;
+	ssize_t r = count;
+	unsigned xfer;
 	int sendZLP = 0;
 	int ret;
 
-	DBG(cdev, "mtp_write(%d)\n", count);
+	DBG(cdev, "mtp_write(%zu)\n", count);
 
 	spin_lock_irq(&dev->lock);
 	if (dev->state == STATE_CANCELED) {
@@ -649,7 +706,7 @@ static ssize_t mtp_write(struct file *fp, const char __user *buf,
 		dev->state = STATE_READY;
 	spin_unlock_irq(&dev->lock);
 
-	DBG(cdev, "mtp_write returning %d\n", r);
+	DBG(cdev, "mtp_write returning %zd\n", r);
 	return r;
 }
 
@@ -768,7 +825,6 @@ static void receive_file_work(struct work_struct *data)
 	int64_t count;
 	int ret, cur_buf = 0;
 	int r = 0;
-	int first_packet = 0;
 
 	/* read our parameters */
 	smp_rmb();
@@ -784,14 +840,8 @@ static void receive_file_work(struct work_struct *data)
 			read_req = dev->rx_req[cur_buf];
 			cur_buf = (cur_buf + 1) % RX_REQ_MAX;
 
-			if (first_packet == 0) {
-				read_req->length = 16384;
-				first_packet = 1;
-			} else {
-				read_req->length = (count > MTP_BULK_BUFFER_SIZE
+			read_req->length = (count > MTP_BULK_BUFFER_SIZE
 					? MTP_BULK_BUFFER_SIZE : count);
-			}
-
 			dev->rx_done = 0;
 			ret = usb_ep_queue(dev->ep_out, read_req, GFP_KERNEL);
 			if (ret < 0) {
@@ -855,7 +905,7 @@ static int mtp_send_event(struct mtp_dev *dev, struct mtp_event *event)
 	int ret;
 	int length = event->length;
 
-	DBG(dev->cdev, "mtp_send_event(%d)\n", event->length);
+	DBG(dev->cdev, "mtp_send_event(%zu)\n", event->length);
 
 	if (length < 0 || length > INTR_BUFFER_SIZE)
 		return -EINVAL;
@@ -968,6 +1018,25 @@ static long mtp_ioctl(struct file *fp, unsigned code, unsigned long value)
 			ret = mtp_send_event(dev, &event);
 		goto out;
 	}
+#ifdef CONFIG_COMPAT
+	case MTP_SEND_EVENT_32:
+	{
+		struct mtp_event_32	event_32;
+		struct mtp_event	event;
+		/* return here so we don't change dev->state below,
+		 * which would interfere with bulk transfer state.
+		 */
+		if (copy_from_user(&event_32, (void __user *)value,
+							sizeof(event_32)))
+			ret = -EFAULT;
+		else {
+			event.length = event_32.length;
+			event.data = (void *)(event_32.data);
+			ret = mtp_send_event(dev, &event);
+		}
+		goto out;
+	}
+#endif
 	}
 
 fail:
@@ -1011,6 +1080,9 @@ static const struct file_operations mtp_fops = {
 	.read = mtp_read,
 	.write = mtp_write,
 	.unlocked_ioctl = mtp_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = mtp_ioctl,
+#endif
 	.open = mtp_open,
 	.release = mtp_release,
 };
@@ -1142,9 +1214,23 @@ mtp_function_bind(struct usb_configuration *c, struct usb_function *f)
 		mtp_highspeed_out_desc.bEndpointAddress =
 			mtp_fullspeed_out_desc.bEndpointAddress;
 	}
+	/* support super speed hardware */
+	if (gadget_is_superspeed(c->cdev->gadget)) {
+		unsigned	max_burst;
 
+		/* Calculate bMaxBurst, we know packet size is 1024 */
+		max_burst = min_t(unsigned, MTP_BULK_BUFFER_SIZE / 1024, 15);
+
+		mtp_ss_in_desc.bEndpointAddress =
+			mtp_fullspeed_in_desc.bEndpointAddress;
+		mtp_ss_in_comp_desc.bMaxBurst = max_burst;
+
+		mtp_ss_out_desc.bEndpointAddress =
+			mtp_fullspeed_out_desc.bEndpointAddress;
+		mtp_ss_out_comp_desc.bMaxBurst = max_burst;
+	}
 	DBG(cdev, "%s speed %s: IN/%s, OUT/%s\n",
-			gadget_is_dualspeed(c->cdev->gadget) ? "dual" : "full",
+		gadget_is_superspeed(c->cdev->gadget) ? "super" : "dual",
 			f->name, dev->ep_in->name, dev->ep_out->name);
 	return 0;
 }
@@ -1234,14 +1320,11 @@ static int mtp_bind_config(struct usb_configuration *c, bool ptp_config)
 
 	printk(KERN_INFO "mtp_bind_config\n");
 
-	/* allocate a string ID for our interface */
-	if (mtp_string_defs[INTERFACE_STRING_INDEX].id == 0) {
-		ret = usb_string_id(c->cdev);
-		if (ret < 0)
-			return ret;
-		mtp_string_defs[INTERFACE_STRING_INDEX].id = ret;
-		mtp_interface_desc.iInterface = ret;
-	}
+	ret = usb_string_id(c->cdev);
+	if (ret < 0)
+		return ret;
+	mtp_string_defs[INTERFACE_STRING_INDEX].id = ret;
+	mtp_interface_desc.iInterface = ret;
 
 	dev->cdev = c->cdev;
 	dev->function.name = "mtp";
@@ -1249,9 +1332,11 @@ static int mtp_bind_config(struct usb_configuration *c, bool ptp_config)
 	if (ptp_config) {
 		dev->function.fs_descriptors = fs_ptp_descs;
 		dev->function.hs_descriptors = hs_ptp_descs;
+		dev->function.ss_descriptors = ss_ptp_descs;
 	} else {
 		dev->function.fs_descriptors = fs_mtp_descs;
 		dev->function.hs_descriptors = hs_mtp_descs;
+		dev->function.ss_descriptors = ss_mtp_descs;
 	}
 	dev->function.bind = mtp_function_bind;
 	dev->function.unbind = mtp_function_unbind;

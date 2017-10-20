@@ -1,11 +1,16 @@
 #ifndef __TARGET_USB_GADGET_H__
 #define __TARGET_USB_GADGET_H__
 
+/*
+ * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ */
+
 #include <linux/kref.h>
 /* #include <linux/usb/uas.h> */
 #include <linux/usb/composite.h>
 #include <linux/usb/uas.h>
 #include <linux/usb/storage.h>
+#include <linux/spinlock.h>
 #include <scsi/scsi.h>
 #include <target/target_core_base.h>
 #include <target/target_core_fabric.h>
@@ -15,6 +20,37 @@
 #define fuas_to_gadget(f)	(f->function.config->cdev->gadget)
 #define UASP_SS_EP_COMP_LOG_STREAMS 4
 #define UASP_SS_EP_COMP_NUM_STREAMS (1 << UASP_SS_EP_COMP_LOG_STREAMS)
+
+/* The following UASP_STREAM_* flags are used to set the flags variable
+ * in the uas_stream structure
+ */
+/* This tells if the stream resource is currently being used */
+#define UASP_STREAM_BUSY   1
+
+/* When all the pre-allocated stream resources are busy and a new stream
+ * resource is created, this flag is used so that the resource can be
+ * freed once the command is completed
+ */
+#define UASP_STREAM_RES_ALLOCATED	2
+/* The following three flags are used to indicate what is the latst
+ * endpoint on which the data transfer is happening for a command so
+ * that when an error occurs, we can dequeue the request on this endpoint
+ * which inturn deletes the command from the SCSI layer in the usb req
+ * callback
+ */
+#define UASP_STREAM_EP_IN_ENQUEUED	4
+#define UASP_STREAM_EP_OUT_ENQUEUED	8
+#define UASP_STREAM_EP_STATUS_ENQUEUED  16
+
+/* Used to clear the above UASP_STREAM_EP_*_QUEUED Flags of the
+ * flags variable in the uas_stream structure. If more flags are
+ * used later then this MASK definition has to be changed accordingly
+ */
+#define UASP_STREAM_EP_QUEUE_CLEAR_MASK       0x3
+
+/* The following is the maximum value for a valid stream ID
+ */
+#define VALID_STREAM_ID_MAX	0xfffd
 
 enum {
 	USB_G_STR_CONFIG = USB_GADGET_FIRST_AVAIL_IDX,
@@ -86,21 +122,37 @@ struct usbg_cmd {
 	/* UAS only */
 	u16 tag;
 	u16 prio_attr;
+	u8 tm_function;
+	u16 tm_tag;
 	struct sense_iu sense_iu;
+	struct response_ui response_iu;
 	enum uas_state state;
 	struct uas_stream *stream;
-
+	bool no_scsi_contact;
+	int cmd_status;
 	/* BOT only */
 	__le32 bot_tag;
 	unsigned int csw_code;
 	unsigned is_read:1;
-
+	/* If this flag is set then the command processing
+	 * should not proceed. For ex if the device receives
+	 * a command with a tag same as the tag of a previously
+	 * received command, then the driver sets this flag for
+	 * the previous command so that the previous command
+	 * processing will not proceed further.
+	 */
+	bool cancel_command;
 };
 
 struct uas_stream {
 	struct usb_request	*req_in;
 	struct usb_request	*req_out;
 	struct usb_request	*req_status;
+	/* Storing the current command pointer that is
+	 * using this stream
+	 */
+	struct usbg_cmd         *cmd;
+	u8     flags;
 };
 
 struct usbg_cdb {
@@ -138,6 +190,7 @@ struct f_uas {
 	struct bot_status	bot_status;
 	struct usb_request	*bot_req_in;
 	struct usb_request	*bot_req_out;
+	spinlock_t lock;
 };
 
 extern struct usbg_tpg *the_only_tpg_I_currently_have;

@@ -3,7 +3,6 @@
  *
  * Copyright (C) 2003-2008 Alan Stern
  * Copyright (C) 2009 Samsung Electronics
- * Copyright (C) 2016 XiaoMi, Inc.
  *                    Author: Michal Nazarewicz <mina86@mina86.com>
  * All rights reserved.
  *
@@ -1095,10 +1094,7 @@ static int do_inquiry(struct fsg_common *common, struct fsg_buffhd *bh)
 	struct fsg_lun *curlun = common->curlun;
 	u8	*buf = (u8 *) bh->buf;
 
-
-
 	if (!curlun || !curlun->filp) {		/* Unsupported LUNs are okay */
-
 		common->bad_lun_okay = 1;
 		memset(buf, 0, 36);
 		buf[0] = 0x7f;		/* Unsupported, no device-type */
@@ -2662,15 +2658,6 @@ static struct fsg_common *fsg_common_init(struct fsg_common *common,
 	common->ep0req = cdev->req;
 	common->cdev = cdev;
 
-	/* Maybe allocate device-global string IDs, and patch descriptors */
-	if (fsg_strings[FSG_STRING_INTERFACE].id == 0) {
-		rc = usb_string_id(cdev);
-		if (unlikely(rc < 0))
-			goto error_release;
-		fsg_strings[FSG_STRING_INTERFACE].id = rc;
-		fsg_intf_desc.iInterface = rc;
-	}
-
 	/*
 	 * Create the LUNs, open their backing files, and register the
 	 * LUN devices in sysfs.
@@ -2962,6 +2949,13 @@ static int fsg_bind_config(struct usb_composite_dev *cdev,
 {
 	struct fsg_dev *fsg;
 	int rc;
+
+	/* allocate device-global string IDs, and patch descriptors */
+	rc = usb_string_id(cdev);
+	if (unlikely(rc < 0))
+		return rc;
+	fsg_strings[FSG_STRING_INTERFACE].id = rc;
+	fsg_intf_desc.iInterface = rc;
 
 	fsg = kzalloc(sizeof *fsg, GFP_KERNEL);
 	if (unlikely(!fsg))

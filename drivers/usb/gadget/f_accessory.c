@@ -2,6 +2,8 @@
  * Gadget Function Driver for Android USB accessories
  *
  * Copyright (C) 2011 Google, Inc.
+ * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ *
  * Author: Mike Lockwood <lockwood@android.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -261,8 +263,10 @@ static void acc_complete_in(struct usb_ep *ep, struct usb_request *req)
 {
 	struct acc_dev *dev = _acc_dev;
 
-	if (req->status != 0)
+	if (req->status == -ESHUTDOWN) {
+		pr_debug("acc_complete_in set disconnected");
 		acc_set_disconnected(dev);
+	}
 
 	req_put(dev, &dev->tx_idle, req);
 
@@ -274,8 +278,10 @@ static void acc_complete_out(struct usb_ep *ep, struct usb_request *req)
 	struct acc_dev *dev = _acc_dev;
 
 	dev->rx_done = 1;
-	if (req->status != 0)
+	if (req->status == -ESHUTDOWN) {
+		pr_debug("acc_complete_out set disconnected");
 		acc_set_disconnected(dev);
+	}
 
 	wake_up(&dev->read_wq);
 }
@@ -552,13 +558,16 @@ static ssize_t acc_read(struct file *fp, char __user *buf,
 {
 	struct acc_dev *dev = fp->private_data;
 	struct usb_request *req;
-	int r = count, xfer;
+	ssize_t r = count;
+	unsigned xfer;
 	int ret = 0;
 
-	pr_debug("acc_read(%d)\n", count);
+	pr_debug("acc_read(%zu)\n", count);
 
-	if (dev->disconnected)
+	if (dev->disconnected) {
+		pr_debug("acc_read disconnected");
 		return -ENODEV;
+	}
 
 	if (count > BULK_BUFFER_SIZE)
 		count = BULK_BUFFER_SIZE;
@@ -569,6 +578,12 @@ static ssize_t acc_read(struct file *fp, char __user *buf,
 	if (ret < 0) {
 		r = ret;
 		goto done;
+	}
+
+	if (dev->rx_done) {
+		// last req cancelled. try to get it.
+		req = dev->rx_req[0];
+		goto copy_data;
 	}
 
 requeue_req:
@@ -588,15 +603,23 @@ requeue_req:
 	ret = wait_event_interruptible(dev->read_wq, dev->rx_done);
 	if (ret < 0) {
 		r = ret;
-		usb_ep_dequeue(dev->ep_out, req);
+		ret = usb_ep_dequeue(dev->ep_out, req);
+		if (ret != 0) {
+			// cancel failed. There can be a data already received.
+			// it will be retrieved in the next read.
+			pr_debug("acc_read: cancelling failed %d", ret);
+		}
 		goto done;
 	}
+
+copy_data:
+	dev->rx_done = 0;
 	if (dev->online) {
 		/* If we got a 0-len packet, throw it back and try again. */
 		if (req->actual == 0)
 			goto requeue_req;
 
-		pr_debug("rx %p %d\n", req, req->actual);
+		pr_debug("rx %p %u\n", req, req->actual);
 		xfer = (req->actual < count) ? req->actual : count;
 		r = xfer;
 		if (copy_to_user(buf, req->buf, xfer))
@@ -605,7 +628,7 @@ requeue_req:
 		r = -EIO;
 
 done:
-	pr_debug("acc_read returning %d\n", r);
+	pr_debug("acc_read returning %zd\n", r);
 	return r;
 }
 
@@ -614,13 +637,16 @@ static ssize_t acc_write(struct file *fp, const char __user *buf,
 {
 	struct acc_dev *dev = fp->private_data;
 	struct usb_request *req = 0;
-	int r = count, xfer;
+	ssize_t r = count;
+	unsigned xfer;
 	int ret;
 
-	pr_debug("acc_write(%d)\n", count);
+	pr_debug("acc_write(%zu)\n", count);
 
-	if (!dev->online || dev->disconnected)
+	if (!dev->online || dev->disconnected) {
+		pr_debug("acc_write disconnected or not online");
 		return -ENODEV;
+	}
 
 	while (count > 0) {
 		if (!dev->online) {
@@ -638,10 +664,17 @@ static ssize_t acc_write(struct file *fp, const char __user *buf,
 			break;
 		}
 
-		if (count > BULK_BUFFER_SIZE)
+		if (count > BULK_BUFFER_SIZE) {
 			xfer = BULK_BUFFER_SIZE;
-		else
+			/* ZLP, They will be more TX requests so not yet. */
+			req->zero = 0;
+		} else {
 			xfer = count;
+			/* If the data length is a multple of the
+			 * maxpacket size then send a zero length packet(ZLP).
+			*/
+			req->zero = ((xfer % dev->ep_in->maxpacket) == 0);
+		}
 		if (copy_from_user(req->buf, buf, xfer)) {
 			r = -EFAULT;
 			break;
@@ -665,7 +698,7 @@ static ssize_t acc_write(struct file *fp, const char __user *buf,
 	if (req)
 		req_put(dev, &dev->tx_idle, req);
 
-	pr_debug("acc_write returning %d\n", r);
+	pr_debug("acc_write returning %zd\n", r);
 	return r;
 }
 
@@ -734,6 +767,9 @@ static const struct file_operations acc_fops = {
 	.read = acc_read,
 	.write = acc_write,
 	.unlocked_ioctl = acc_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = acc_ioctl,
+#endif
 	.open = acc_open,
 	.release = acc_release,
 };
@@ -919,6 +955,10 @@ kill_all_hid_devices(struct acc_dev *dev)
 	struct acc_hid_dev *hid;
 	struct list_head *entry, *temp;
 	unsigned long flags;
+
+	/* do nothing if usb accessory device doesn't exist */
+	if (!dev)
+		return;
 
 	spin_lock_irqsave(&dev->lock, flags);
 	list_for_each_safe(entry, temp, &dev->hid_list) {
@@ -1110,13 +1150,11 @@ static int acc_bind_config(struct usb_configuration *c)
 	printk(KERN_INFO "acc_bind_config\n");
 
 	/* allocate a string ID for our interface */
-	if (acc_string_defs[INTERFACE_STRING_INDEX].id == 0) {
-		ret = usb_string_id(c->cdev);
-		if (ret < 0)
-			return ret;
-		acc_string_defs[INTERFACE_STRING_INDEX].id = ret;
-		acc_interface_desc.iInterface = ret;
-	}
+	ret = usb_string_id(c->cdev);
+	if (ret < 0)
+		return ret;
+	acc_string_defs[INTERFACE_STRING_INDEX].id = ret;
+	acc_interface_desc.iInterface = ret;
 
 	dev->cdev = c->cdev;
 	dev->function.name = "accessory";
