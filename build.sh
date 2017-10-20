@@ -122,7 +122,8 @@ MAKE_ZIP()
 	echo " Done ! "
 
 }
-
+echo " "
+echo " "
 echo -e -n "Do you want to clean build directory (y/n)? "
 old_stty_cfg=$(stty -g)
 stty raw -echo
@@ -132,6 +133,7 @@ stty $old_stty_cfg
 if echo "$answer" | grep -iq "^y" ;then
     CLEAN_BUILD &&
     SETUP_BUILD &&
+echo " "    
 echo -e -n "Do you want to make menuconfig.. (y/n)? "
 old_stty_cfg=$(stty -g)
 stty raw -echo
@@ -161,6 +163,8 @@ echo "Finished building $LOCALVERSION!"
  
 if [ -f $zImage ] ; then
    {
+echo " "
+echo " "   
 echo -e -n "Do you want to make Flashable zip.. (y/n)? "
 old_stty_cfg=$(stty -g)
 stty raw -echo
@@ -169,7 +173,9 @@ stty $old_stty_cfg
 
 if echo "$answer" | grep -iq "^y" ;then
 
-      MAKE_ZIP
+      MAKE_ZIP &&
+   echo " "
+   echo " Collect ZIP from ${RDIR} ..."
       
       fi
   }

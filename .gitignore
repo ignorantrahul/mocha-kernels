@@ -25,6 +25,7 @@
 modules.builtin
 *.elf
 *.bin
+*.zip
 *.gz
 *.bz2
 *.lzma
