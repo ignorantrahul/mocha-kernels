@@ -21,7 +21,7 @@ THREADS=$((CPU_THREADS + 1))
    echo "You have already toolchain..."
  else
   git clone https://github.com/RahulTheVirus/toolchain-4.X.git $TOOLCHAIN
-  sudo find toolchain -type f -exec chmod a+rwx {} \;
+  sudo find $TOOLCHAIN -type f -exec chmod a+rwx {} \;
   
  fi
 ############## SCARY NO-TOUCHY STUFF ###############
